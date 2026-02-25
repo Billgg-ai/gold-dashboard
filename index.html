@@ -5,18 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>COMEX 金融指标监测</title>
 
-  <!-- Tailwind（CDN 版会有提示警告，但不影响运行） -->
   <script src="https://cdn.tailwindcss.com"></script>
 
-  <!-- React / ReactDOM -->
   <script crossorigin src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
-
-  <!-- Recharts 依赖：PropTypes（必须，否则会报 oneOfType / Recharts 未定义） -->
-  <script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
+  <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.min.js"></script>
-
-  <!-- Babel（用于在浏览器直接跑 JSX） -->
   <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
 
   <style>
@@ -37,222 +31,189 @@
 
   <script type="text/babel">
     const { useState, useEffect, useMemo, useCallback, useRef } = React;
-
-    // ✅ Recharts 来自 window（UMD）
     const Recharts = window.Recharts;
     const {
       LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
-      Area, AreaChart, ReferenceLine, CartesianGrid
+      Area, AreaChart, ReferenceLine, CartesianGrid, BarChart, Bar
     } = Recharts;
 
-    // ─────────────────────────────────────────────
-    // 配置
-    // ─────────────────────────────────────────────
+    // ─── 配置 ───
     const TD_KEY = "129d931b7649408ea8c093ce5c6172f7";
-    const REFRESH_MS = 120_000;
+    const GEMINI_KEY = "AIzaSyDv6ucMjhZrJ06n4mLc0TflSon4AY66Z80";
+    const GEMINI_MODEL = "gemini-2.5-flash-preview-05-20";
 
     const CORS_PROXIES = [
-      (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
-      (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-      (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+      (u) => "https://corsproxy.io/?" + encodeURIComponent(u),
+      (u) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
+      (u) => "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u),
     ];
 
     const VALID_RANGES = {
-      gold:   { min: 500,  max: 10000 },
+      gold:   { min: 500,  max: 15000 },
       silver: { min: 5,    max: 500   },
       copper: { min: 0.5,  max: 20    },
+      gvz:    { min: 1,    max: 200   },
     };
+    const isValid = (k, v) => v != null && !isNaN(v) && v >= VALID_RANGES[k].min && v <= VALID_RANGES[k].max;
 
-    const isValid = (key, val) => {
-      if (val == null || isNaN(val)) return false;
-      return val >= VALID_RANGES[key].min && val <= VALID_RANGES[key].max;
-    };
-
-    // 兼容性更好的超时 fetch（不用 AbortSignal.timeout）
-    async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
-      const controller = new AbortController();
-      const id = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        const res = await fetch(url, { ...options, signal: controller.signal });
-        return res;
-      } finally {
-        clearTimeout(id);
-      }
+    async function fetchT(url, opts = {}, ms = 15000) {
+      const c = new AbortController();
+      const id = setTimeout(() => c.abort(), ms);
+      try { return await fetch(url, { ...opts, signal: c.signal }); }
+      finally { clearTimeout(id); }
     }
 
-    // ─────────────────────────────────────────────
-    // Twelvedata — 黄金
-    // ─────────────────────────────────────────────
+    // ─── Twelvedata ───
     const TD = {
       async history(size = 780) {
-        const url = `https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1day&outputsize=${size}&apikey=${TD_KEY}`;
-        const res = await fetchWithTimeout(url, {}, 15000);
-        if (!res.ok) throw new Error(`Twelvedata HTTP ${res.status}`);
-        const d = await res.json();
-        if (d.status !== "ok") throw new Error(`Twelvedata: ${d.message || d.code}`);
-        const series = (d.values || [])
-          .map(v => ({ date: v.datetime, close: parseFloat(v.close) }))
-          .filter(v => isValid("gold", v.close))
-          .reverse();
-        if (series.length < 10) throw new Error("Twelvedata: 黄金历史数据不足");
-        return series;
+        const r = await fetchT(`https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1day&outputsize=${size}&apikey=${TD_KEY}`);
+        if (!r.ok) throw new Error("Twelvedata HTTP " + r.status);
+        const d = await r.json();
+        if (d.status !== "ok") throw new Error("Twelvedata: " + (d.message || d.code));
+        const s = (d.values || []).map(v => ({ date: v.datetime, close: +v.close })).filter(v => isValid("gold", v.close)).reverse();
+        if (s.length < 10) throw new Error("黄金历史数据不足");
+        return s;
       },
-
       async price() {
-        const url = `https://api.twelvedata.com/price?symbol=XAU/USD&apikey=${TD_KEY}`;
-        const res = await fetchWithTimeout(url, {}, 10000);
-        if (!res.ok) throw new Error(`Twelvedata price HTTP ${res.status}`);
-        const d = await res.json();
-        if (d.code) throw new Error(`Twelvedata price: ${d.message}`);
-        const p = parseFloat(d.price);
-        if (!isValid("gold", p)) throw new Error(`黄金价格异常: ${p}`);
+        const r = await fetchT(`https://api.twelvedata.com/price?symbol=XAU/USD&apikey=${TD_KEY}`, {}, 10000);
+        if (!r.ok) throw new Error("Twelvedata price HTTP " + r.status);
+        const d = await r.json();
+        if (d.code) throw new Error("Twelvedata: " + d.message);
+        const p = +d.price;
+        if (!isValid("gold", p)) throw new Error("黄金价格异常: " + p);
         return p;
       },
     };
 
-    // ─────────────────────────────────────────────
-    // Yahoo Finance — 白银 + 铜
-    // ─────────────────────────────────────────────
-    let yfProxyIdx = 0;
-
+    // ─── Yahoo Finance ───
+    let yfPIdx = 0;
     const YF = {
       async _fetch(url) {
-        let lastErr;
+        let last;
         for (let i = 0; i < CORS_PROXIES.length; i++) {
-          const idx = (yfProxyIdx + i) % CORS_PROXIES.length;
+          const idx = (yfPIdx + i) % CORS_PROXIES.length;
           try {
-            const res = await fetchWithTimeout(CORS_PROXIES[idx](url), {}, 15000);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
-            yfProxyIdx = idx;
-            return data;
-          } catch (e) { lastErr = e; }
+            const r = await fetchT(CORS_PROXIES[idx](url));
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            const d = await r.json(); yfPIdx = idx; return d;
+          } catch (e) { last = e; }
         }
-        throw new Error(`Yahoo Finance 所有代理失败: ${lastErr?.message || "unknown"}`);
+        throw new Error("Yahoo 代理失败: " + (last?.message || ""));
       },
-
       _parse(raw, key) {
-        const result = raw?.chart?.result?.[0];
-        if (!result) throw new Error("Yahoo Finance 响应为空");
-
-        const timestamps = result.timestamp || [];
-        const closes = result.indicators?.quote?.[0]?.close || [];
-
-        const series = [];
-        for (let i = 0; i < timestamps.length; i++) {
-          if (closes[i] == null) continue;
-          if (!isValid(key, closes[i])) continue;
-          const d = new Date(timestamps[i] * 1000);
-          series.push({ date: d.toISOString().slice(0, 10), close: closes[i] });
+        const res = raw?.chart?.result?.[0];
+        if (!res) throw new Error("Yahoo 响应为空");
+        const ts = res.timestamp || [], cl = res.indicators?.quote?.[0]?.close || [];
+        const s = [];
+        for (let i = 0; i < ts.length; i++) {
+          if (cl[i] == null || !isValid(key, cl[i])) continue;
+          s.push({ date: new Date(ts[i]*1000).toISOString().slice(0,10), close: cl[i] });
         }
-
-        if (series.length < 10) throw new Error(`Yahoo Finance ${key} 有效数据不足 (${series.length}条)`);
-        const meta = result.meta || {};
-        const price = meta.regularMarketPrice;
-        if (!isValid(key, price)) throw new Error(`Yahoo Finance ${key} 实时价格异常: ${price}`);
-
-        return { series, price, prevClose: meta.chartPreviousClose };
+        if (s.length < 10) throw new Error("Yahoo " + key + " 数据不足");
+        const m = res.meta || {};
+        const p = m.regularMarketPrice;
+        if (!isValid(key, p)) throw new Error("Yahoo " + key + " 价格异常: " + p);
+        return { series: s, price: p, prevClose: m.chartPreviousClose };
       },
-
       async symbol(sym, key, range = "3y") {
         const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=${range}&interval=1d&includePrePost=false`;
-        const raw = await YF._fetch(url);
-        return YF._parse(raw, key);
+        return YF._parse(await YF._fetch(url), key);
       },
-
       async price(sym, key) {
         const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=5d&interval=1d&includePrePost=false`;
         const raw = await YF._fetch(url);
-        const result = raw?.chart?.result?.[0];
-        if (!result) throw new Error(`Yahoo ${sym} 响应为空`);
-        const p = result.meta?.regularMarketPrice;
-        if (!isValid(key, p)) throw new Error(`Yahoo ${sym} 价格异常: ${p}`);
+        const res = raw?.chart?.result?.[0];
+        if (!res) throw new Error("Yahoo " + sym + " 为空");
+        const p = res.meta?.regularMarketPrice;
+        if (!isValid(key, p)) throw new Error("Yahoo " + sym + " 价格异常: " + p);
         return p;
+      },
+      async gvzHistory(range = "3mo") {
+        const url = `https://query1.finance.yahoo.com/v8/finance/chart/%5EGVZ?range=${range}&interval=1d&includePrePost=false`;
+        const raw = await YF._fetch(url);
+        const res = raw?.chart?.result?.[0];
+        if (!res) throw new Error("GVZ 响应为空");
+        const ts = res.timestamp || [], cl = res.indicators?.quote?.[0]?.close || [];
+        const s = [];
+        for (let i = 0; i < ts.length; i++) {
+          if (cl[i] == null || !isValid("gvz", cl[i])) continue;
+          s.push({ date: new Date(ts[i]*1000).toISOString().slice(0,10), close: +cl[i].toFixed(2) });
+        }
+        if (s.length < 5) throw new Error("GVZ 有效数据不足");
+        const p = res.meta?.regularMarketPrice;
+        return { series: s, price: isValid("gvz", p) ? +p.toFixed(2) : s[s.length-1].close };
       },
     };
 
-    // ─────────────────────────────────────────────
-    // 工具
-    // ─────────────────────────────────────────────
+    // ─── Gemini ───
+    async function askGemini(prompt) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`;
+      const body = { contents: [{ parts: [{ text: prompt }] }] };
+      const r = await fetchT(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }, 30000);
+      if (!r.ok) {
+        const t = await r.text().catch(() => "");
+        throw new Error("Gemini HTTP " + r.status + ": " + t.slice(0, 200));
+      }
+      const d = await r.json();
+      return d?.candidates?.[0]?.content?.parts?.[0]?.text || "Gemini 未返回内容";
+    }
+
+    // ─── 工具 ───
     const computeMA = (arr, key, n) =>
       arr.map((_, i) => {
         if (i < n - 1) return null;
-        let s = 0;
-        for (let j = i - n + 1; j <= i; j++) s += arr[j][key];
-        return s / n;
+        let s = 0; for (let j = i-n+1; j <= i; j++) s += arr[j][key]; return s / n;
       });
 
     const sampleArr = (a, m) => {
       if (a.length <= m) return a;
-      const s = Math.floor(a.length / m);
-      const o = [];
+      const s = Math.floor(a.length / m), o = [];
       for (let i = 0; i < a.length; i += s) o.push(a[i]);
-      if (o[o.length - 1] !== a[a.length - 1]) o.push(a[a.length - 1]);
+      if (o[o.length-1] !== a[a.length-1]) o.push(a[a.length-1]);
       return o;
     };
 
-    // ─────────────────────────────────────────────
-    // UI
-    // ─────────────────────────────────────────────
+    // ─── UI 组件 ───
     const Badge = ({ status }) => {
-      const map = {
-        live:    ["#34d399", "LIVE"],
-        partial: ["#fbbf24", "部分异常"],
-        loading: ["#fbbf24", "加载中"],
-        error:   ["#f87171", "数据异常"],
-      };
+      const map = { live:["#34d399","LIVE"], partial:["#fbbf24","部分异常"], loading:["#fbbf24","加载中"], error:["#f87171","数据异常"] };
       const [c, label] = map[status] || map.error;
       return (
         <div style={{display:"flex",alignItems:"center",gap:6}}>
-          <span className={status !== "error" ? "animate-pulse" : ""} style={{width:8,height:8,borderRadius:"50%",background:c,display:"inline-block"}} />
+          <span className={status !== "error" ? "animate-pulse" : ""} style={{width:8,height:8,borderRadius:"50%",background:c}} />
           <span style={{fontSize:11,fontWeight:700,letterSpacing:1,color:c}}>{label}</span>
         </div>
       );
     };
 
-    const Btn = ({ onClick, disabled, title, children }) => (
-      <button
-        onClick={onClick}
-        disabled={disabled}
-        title={title}
+    const Btn = ({ onClick, disabled, title, children, style: sx }) => (
+      <button onClick={onClick} disabled={disabled} title={title}
         style={{
-          width: 32,
-          height: 32,
-          borderRadius: 8,
-          background: "#1f2937",
-          border: "1px solid #374151",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          cursor: disabled ? "not-allowed" : "pointer",
-          opacity: disabled ? 0.5 : 1,
-          transition: "background .2s",
-          flexShrink: 0,
+          height:32, borderRadius:8, background:"#1f2937", border:"1px solid #374151",
+          display:"flex", alignItems:"center", justifyContent:"center", gap:6,
+          cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1,
+          transition:"background .2s", flexShrink:0, padding:"0 10px", ...sx,
         }}
-        onMouseEnter={(e) => !disabled && (e.currentTarget.style.background = "#374151")}
-        onMouseLeave={(e) => (e.currentTarget.style.background = "#1f2937")}
-      >
-        {children}
-      </button>
+        onMouseEnter={e => !disabled && (e.currentTarget.style.background="#374151")}
+        onMouseLeave={e => e.currentTarget.style.background="#1f2937"}
+      >{children}</button>
     );
 
     const PriceCard = ({ label, symbol, source, value, unit, change, color, error, loading }) => (
       <div style={{
-        background: error ? "rgba(69,10,10,0.30)" : "#1f2937",
-        borderRadius: 12,
-        padding: 14,
-        border: `1px solid ${error ? "rgba(239,68,68,0.45)" : "#374151"}`,
-        flex: 1,
-        minWidth: 0,
+        background: error ? "rgba(69,10,10,0.3)" : "#1f2937", borderRadius:12, padding:14,
+        border: "1px solid " + (error ? "rgba(239,68,68,0.45)" : "#374151"), flex:1, minWidth:0,
       }}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
-            <span style={{width:10,height:10,borderRadius:"50%",background: error ? "#ef4444" : color,display:"inline-block"}} />
+            <span style={{width:10,height:10,borderRadius:"50%",background: error ? "#ef4444" : color}} />
             <span style={{color:"#9ca3af",fontSize:11,fontWeight:600}}>{label}</span>
           </div>
           <span style={{fontSize:10,fontFamily:"monospace",color: error ? "rgba(239,68,68,0.55)" : "#4b5563"}}>{symbol}</span>
         </div>
-
         {loading ? (
           <div className="animate-pulse" style={{height:32,marginTop:8,background:"#374151",borderRadius:6}} />
         ) : error ? (
@@ -282,15 +243,15 @@
 
     const RatioCard = ({ label, value, avg, high, low, error }) => {
       if (error) return (
-        <div style={{background:"rgba(69,10,10,0.30)",borderRadius:12,padding:16,border:"1px solid rgba(239,68,68,0.30)",display:"flex",gap:12,alignItems:"center"}}>
+        <div style={{background:"rgba(69,10,10,0.3)",borderRadius:12,padding:16,border:"1px solid rgba(239,68,68,0.3)",display:"flex",gap:12,alignItems:"center"}}>
           <span style={{fontSize:18}}>⚠</span>
           <div>
             <div style={{color:"#9ca3af",fontSize:11,fontWeight:600}}>{label}</div>
-            <div style={{color:"#f87171",fontSize:11,marginTop:2}}>无法计算 · 依赖数据异常</div>
+            <div style={{color:"#f87171",fontSize:11,marginTop:2}}>无法计算</div>
           </div>
         </div>
       );
-      const pct = Math.min(100, Math.max(5, ((parseFloat(value) - parseFloat(low)) / (parseFloat(high) - parseFloat(low))) * 100));
+      const pct = Math.min(100, Math.max(5, ((+value - +low) / (+high - +low)) * 100));
       return (
         <div style={{background:"#1f2937",borderRadius:12,padding:16,border:"1px solid #374151"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
@@ -308,7 +269,7 @@
               position:"absolute",top:"50%",transform:"translateY(-50%)",
               width:10,height:10,borderRadius:"50%",background:"#fff",
               border:"2px solid #030712",boxShadow:"0 0 8px rgba(255,255,255,.25)",
-              left:`calc(${pct}% - 5px)`,transition:"left .5s"
+              left:"calc("+pct+"% - 5px)",transition:"left .5s"
             }} />
           </div>
         </div>
@@ -329,7 +290,7 @@
         <div style={{background:"rgba(3,7,18,.95)",border:"1px solid #4b5563",borderRadius:8,padding:"8px 12px",boxShadow:"0 10px 30px rgba(0,0,0,.55)"}}>
           <div style={{color:"#6b7280",fontSize:11,fontWeight:600,marginBottom:6}}>{label}</div>
           {payload.map((p,i) => (
-            <div key={i} style={{fontSize:11,fontFamily:"monospace",fontWeight:600,color:p.stroke||p.color}}>
+            <div key={i} style={{fontSize:11,fontFamily:"monospace",fontWeight:600,color:p.stroke||p.color||"#fff"}}>
               {p.name}: {typeof p.value === "number" ? p.value.toFixed(decimals) : p.value}{suffix || ""}
             </div>
           ))}
@@ -347,204 +308,221 @@
       </div>
     );
 
-    // ─────────────────────────────────────────────
-    // 主组件
-    // ─────────────────────────────────────────────
-    function COMEXDashboard() {
+    // ─── 主组件 ───
+    function App() {
       const [time, setTime] = useState(new Date());
-      const [loadStatus, setLoadStatus] = useState("loading"); // loading | live | partial | error
+      const [loadStatus, setLoadStatus] = useState("loading");
 
-      const [gold,   setGold]   = useState({ hist:null, price:null, prev:null, err:null, loading:true });
-      const [silver, setSilver] = useState({ hist:null, price:null, prev:null, err:null, loading:true });
-      const [copper, setCopper] = useState({ hist:null, price:null, prev:null, err:null, loading:true });
+      const [gold,   setGold]   = useState({ hist:null,price:null,prev:null,err:null,loading:true });
+      const [silver, setSilver] = useState({ hist:null,price:null,prev:null,err:null,loading:true });
+      const [copper, setCopper] = useState({ hist:null,price:null,prev:null,err:null,loading:true });
+      const [gvz,    setGvz]    = useState({ hist:null,price:null,err:null,loading:true });
 
-      const [logs, setLogs] = useState([]);
+      const [aiText,    setAiText]    = useState(null);
+      const [aiLoading, setAiLoading] = useState(false);
+      const [aiError,   setAiError]   = useState(null);
+
       const [refreshing, setRefreshing] = useState(false);
       const [lastUpdate, setLastUpdate] = useState(null);
-
       const initRef = useRef(false);
-      const timerRef = useRef(null);
 
-      const addLog = useCallback((msg, type="info") => {
-        setLogs(prev => [{ msg, type, t: new Date().toLocaleTimeString("zh-CN") }, ...prev].slice(0, 20));
-      }, []);
+      useEffect(() => { const t = setInterval(() => setTime(new Date()), 1000); return () => clearInterval(t); }, []);
 
-      useEffect(() => {
-        const t = setInterval(() => setTime(new Date()), 1000);
-        return () => clearInterval(t);
-      }, []);
-
-      const updateOverallStatus = useCallback((g, s, c) => {
-        const ok = [g, s, c].filter(x => !x.err && !x.loading).length;
+      const updateStatus = useCallback((g, s, c) => {
+        const ok = [g,s,c].filter(x => !x.err && !x.loading).length;
         setLoadStatus(ok === 3 ? "live" : ok > 0 ? "partial" : "error");
       }, []);
 
+      // ── Gemini 分析 ──
+      const runGeminiAnalysis = useCallback(async (goldData, silverData, copperData, gvzData) => {
+        setAiLoading(true); setAiError(null);
+        try {
+          const gH = goldData?.hist?.slice(-30) || [];
+          const last = gH[gH.length-1];
+          const prev = gH[gH.length-2];
+
+          const m5  = gH.length >= 5  ? gH.slice(-5).reduce((a,b)=>a+b.close,0)/5  : null;
+          const m10 = gH.length >= 10 ? gH.slice(-10).reduce((a,b)=>a+b.close,0)/10 : null;
+          const m20 = gH.length >= 20 ? gH.slice(-20).reduce((a,b)=>a+b.close,0)/20 : null;
+
+          const bias5  = m5  ? ((last.close-m5)/m5*100).toFixed(2)   : "N/A";
+          const bias20 = m20 ? ((last.close-m20)/m20*100).toFixed(2) : "N/A";
+
+          const high30 = Math.max(...gH.map(d=>d.close));
+          const low30  = Math.min(...gH.map(d=>d.close));
+
+          const gPrice = goldData?.price?.toFixed(2) || "N/A";
+          const sPrice = silverData?.price?.toFixed(3) || "N/A";
+          const cPrice = copperData?.price?.toFixed(4) || "N/A";
+          const gvzVal = gvzData?.price || "N/A";
+
+          const gsRatio = (goldData?.price && silverData?.price) ? (goldData.price/silverData.price).toFixed(2) : "N/A";
+          const gcRatio = (goldData?.price && copperData?.price) ? (goldData.price/(copperData.price*1000)).toFixed(4) : "N/A";
+
+          const prompt = `你是一位专业的贵金属技术面分析师。请根据以下COMEX最新数据，给出黄金的技术面分析和交易信号判断。
+
+最新数据：
+- 黄金价格: $${gPrice}/oz（前一日: $${prev?.close?.toFixed(2) || "N/A"}）
+- 白银价格: $${sPrice}/oz
+- 铜价格: $${cPrice}/lb
+- GVZ 黄金波动率指数: ${gvzVal}
+- 金银比: ${gsRatio}
+- 金铜比: ${gcRatio}
+
+近30个交易日技术指标：
+- 30日最高: $${high30.toFixed(2)}  最低: $${low30.toFixed(2)}
+- MA5: $${m5?.toFixed(2) || "N/A"}  MA10: $${m10?.toFixed(2) || "N/A"}  MA20: $${m20?.toFixed(2) || "N/A"}
+- BIAS(5): ${bias5}%  BIAS(20): ${bias20}%
+
+近5日收盘价:
+${gH.slice(-5).map(d => d.date + ": $" + d.close.toFixed(2)).join("\n")}
+
+请输出以下内容（用中文，简洁专业，总计控制在300字以内）：
+1. 【信号判断】明确给出"买入信号🟢"、"卖出信号🔴"或"观望⚪"
+2. 【技术面分析】分析均线排列、乖离率、波动率、金银比/金铜比的含义
+3. 【时事与风险】结合近期可能影响金价的重大宏观事件（美联储政策、地缘政治、美元走势等）给出风险提示`;
+
+          const text = await askGemini(prompt);
+          setAiText(text);
+        } catch (e) {
+          setAiError(e.message);
+        }
+        setAiLoading(false);
+      }, []);
+
+      // ── 全量加载（仅在初始化 + 手动刷新时调用）──
       const fullLoad = useCallback(async () => {
-        setLoadStatus("loading");
-        setGold(v => ({ ...v, loading:true, err:null }));
-        setSilver(v => ({ ...v, loading:true, err:null }));
-        setCopper(v => ({ ...v, loading:true, err:null }));
-        addLog("🚀 开始全量加载...");
+        setLoadStatus("loading"); setRefreshing(true);
+        setGold(v=>({...v,loading:true,err:null}));
+        setSilver(v=>({...v,loading:true,err:null}));
+        setCopper(v=>({...v,loading:true,err:null}));
+        setGvz(v=>({...v,loading:true,err:null}));
 
-        let gState, sState, cState;
+        let gS, sS, cS, gvzS;
 
+        // 黄金
         try {
-          addLog("⏳ Twelvedata: 拉取黄金3年日线...");
           const hist = await TD.history(780);
-          const price = hist[hist.length - 1].close;
-          const prev = hist[hist.length - 2]?.close ?? price;
-          gState = { hist, price, prev, err:null, loading:false };
-          setGold(gState);
-          addLog(`✓ 黄金 ${hist.length}条 · 最新 $${price.toFixed(2)}`, "success");
-        } catch (e) {
-          gState = { hist:null, price:null, prev:null, err:e.message, loading:false };
-          setGold(gState);
-          addLog(`✗ 黄金失败: ${e.message}`, "error");
+          const price = hist[hist.length-1].close;
+          const prev  = hist[hist.length-2]?.close ?? price;
+          gS = { hist, price, prev, err:null, loading:false };
+          setGold(gS);
+        } catch(e) {
+          gS = { hist:null,price:null,prev:null,err:e.message,loading:false };
+          setGold(gS);
         }
 
+        // 白银
         try {
-          addLog("⏳ Yahoo Finance: 拉取白银3年日线 (SI=F)...");
-          const data = await YF.symbol("SI=F", "silver", "3y");
-          const price = data.price;
-          const prev = data.prevClose ?? data.series[data.series.length - 2]?.close ?? price;
-          sState = { hist:data.series, price, prev, err:null, loading:false };
-          setSilver(sState);
-          addLog(`✓ 白银 ${data.series.length}条 · 最新 $${price.toFixed(3)}`, "success");
-        } catch (e) {
-          sState = { hist:null, price:null, prev:null, err:e.message, loading:false };
-          setSilver(sState);
-          addLog(`✗ 白银失败: ${e.message}`, "error");
+          const data = await YF.symbol("SI=F","silver","3y");
+          sS = { hist:data.series, price:data.price, prev:data.prevClose??data.series[data.series.length-2]?.close??data.price, err:null, loading:false };
+          setSilver(sS);
+        } catch(e) {
+          sS = { hist:null,price:null,prev:null,err:e.message,loading:false };
+          setSilver(sS);
         }
 
+        // 铜
         try {
-          addLog("⏳ Yahoo Finance: 拉取铜3年日线 (HG=F)...");
-          const data = await YF.symbol("HG=F", "copper", "3y");
-          const price = data.price;
-          const prev = data.prevClose ?? data.series[data.series.length - 2]?.close ?? price;
-          cState = { hist:data.series, price, prev, err:null, loading:false };
-          setCopper(cState);
-          addLog(`✓ 铜 ${data.series.length}条 · 最新 $${price.toFixed(4)}`, "success");
-        } catch (e) {
-          cState = { hist:null, price:null, prev:null, err:e.message, loading:false };
-          setCopper(cState);
-          addLog(`✗ 铜失败: ${e.message}`, "error");
+          const data = await YF.symbol("HG=F","copper","3y");
+          cS = { hist:data.series, price:data.price, prev:data.prevClose??data.series[data.series.length-2]?.close??data.price, err:null, loading:false };
+          setCopper(cS);
+        } catch(e) {
+          cS = { hist:null,price:null,prev:null,err:e.message,loading:false };
+          setCopper(cS);
+        }
+
+        // GVZ
+        try {
+          const data = await YF.gvzHistory("3mo");
+          gvzS = { hist:data.series, price:data.price, err:null, loading:false };
+          setGvz(gvzS);
+        } catch(e) {
+          gvzS = { hist:null,price:null,err:e.message,loading:false };
+          setGvz(gvzS);
         }
 
         setLastUpdate(new Date());
-        updateOverallStatus(gState, sState, cState);
-        addLog("📋 全量加载完成");
-      }, [addLog, updateOverallStatus]);
-
-      const refreshPrices = useCallback(async () => {
-        setRefreshing(true);
-        addLog("🔄 刷新实时价格...");
-
-        try {
-          const p = await TD.price();
-          setGold(prev => ({ ...prev, price: p, err:null }));
-          addLog(`✓ 黄金刷新: $${p.toFixed(2)}`, "success");
-        } catch (e) {
-          setGold(prev => ({ ...prev, err: e.message }));
-          addLog(`✗ 黄金刷新失败: ${e.message}`, "error");
-        }
-
-        try {
-          const p = await YF.price("SI=F", "silver");
-          setSilver(prev => ({ ...prev, price: p, err:null }));
-          addLog(`✓ 白银刷新: $${p.toFixed(3)}`, "success");
-        } catch (e) {
-          setSilver(prev => ({ ...prev, err: e.message }));
-          addLog(`✗ 白银刷新失败: ${e.message}`, "error");
-        }
-
-        try {
-          const p = await YF.price("HG=F", "copper");
-          setCopper(prev => ({ ...prev, price: p, err:null }));
-          addLog(`✓ 铜刷新: $${p.toFixed(4)}`, "success");
-        } catch (e) {
-          setCopper(prev => ({ ...prev, err: e.message }));
-          addLog(`✗ 铜刷新失败: ${e.message}`, "error");
-        }
-
-        setLastUpdate(new Date());
+        updateStatus(gS, sS, cS);
         setRefreshing(false);
-      }, [addLog]);
+
+        // Gemini 分析
+        runGeminiAnalysis(gS, sS, cS, gvzS);
+      }, [updateStatus, runGeminiAnalysis]);
 
       useEffect(() => {
         if (!initRef.current) { initRef.current = true; fullLoad(); }
-        timerRef.current = setInterval(refreshPrices, REFRESH_MS);
-        return () => clearInterval(timerRef.current);
-      }, [fullLoad, refreshPrices]);
+      }, [fullLoad]);
 
+      // 涨跌幅
       const goldChg   = gold.prev   ? ((gold.price   - gold.prev)   / gold.prev   * 100) : null;
       const silverChg = silver.prev ? ((silver.price - silver.prev) / silver.prev * 100) : null;
       const copperChg = copper.prev ? ((copper.price - copper.prev) / copper.prev * 100) : null;
 
+      // 合并历史
       const allData = useMemo(() => {
         if (!gold.hist || !silver.hist || !copper.hist) return null;
-        const gMap = Object.fromEntries(gold.hist.map(d => [d.date, d.close]));
-        const sMap = Object.fromEntries(silver.hist.map(d => [d.date, d.close]));
-        const cMap = Object.fromEntries(copper.hist.map(d => [d.date, d.close]));
-        const dates = [...new Set([...Object.keys(gMap), ...Object.keys(sMap), ...Object.keys(cMap)])].sort();
+        const gM = Object.fromEntries(gold.hist.map(d=>[d.date,d.close]));
+        const sM = Object.fromEntries(silver.hist.map(d=>[d.date,d.close]));
+        const cM = Object.fromEntries(copper.hist.map(d=>[d.date,d.close]));
+        const dates = [...new Set([...Object.keys(gM),...Object.keys(sM),...Object.keys(cM)])].sort();
         const merged = [];
         for (const date of dates) {
-          const g = gMap[date], s = sMap[date], c = cMap[date];
-          if (!g || !s || !c) continue;
-          merged.push({
-            date, label: date.slice(0,7),
-            gold: g, silver: s, copper: c,
-            goldCopperRatio: +(g / (c * 1000)).toFixed(4),
-            goldSilverRatio: +(g / s).toFixed(2),
-          });
+          const g=gM[date],s=sM[date],c=cM[date];
+          if(!g||!s||!c) continue;
+          merged.push({ date, label:date.slice(0,7), gold:g, silver:s, copper:c,
+            goldCopperRatio:+(g/(c*1000)).toFixed(4), goldSilverRatio:+(g/s).toFixed(2) });
         }
         return merged.length > 50 ? merged : null;
       }, [gold.hist, silver.hist, copper.hist]);
 
-      const chartData = useMemo(() => allData ? sampleArr(allData, 220) : null, [allData]);
+      const chartData = useMemo(() => allData ? sampleArr(allData,220) : null, [allData]);
 
       const stats = useMemo(() => {
         if (!chartData) return null;
-        const gc = chartData.map(d => d.goldCopperRatio).filter(Boolean);
-        const gs = chartData.map(d => d.goldSilverRatio).filter(Boolean);
-        if (!gc.length || !gs.length) return null;
+        const gc = chartData.map(d=>d.goldCopperRatio).filter(Boolean);
+        const gs = chartData.map(d=>d.goldSilverRatio).filter(Boolean);
+        if (!gc.length||!gs.length) return null;
         return {
-          avgGCR: (gc.reduce((a,b)=>a+b,0) / gc.length).toFixed(4),
-          maxGCR: Math.max(...gc).toFixed(4),
-          minGCR: Math.min(...gc).toFixed(4),
-          avgGSR: (gs.reduce((a,b)=>a+b,0) / gs.length).toFixed(2),
-          maxGSR: Math.max(...gs).toFixed(2),
-          minGSR: Math.min(...gs).toFixed(2),
+          avgGCR:(gc.reduce((a,b)=>a+b,0)/gc.length).toFixed(4), maxGCR:Math.max(...gc).toFixed(4), minGCR:Math.min(...gc).toFixed(4),
+          avgGSR:(gs.reduce((a,b)=>a+b,0)/gs.length).toFixed(2), maxGSR:Math.max(...gs).toFixed(2), minGSR:Math.min(...gs).toFixed(2),
         };
       }, [chartData]);
 
-      const latestGCR = (gold.price && copper.price) ? (gold.price / (copper.price * 1000)).toFixed(4) : null;
-      const latestGSR = (gold.price && silver.price) ? (gold.price / silver.price).toFixed(2) : null;
+      const latestGCR = (gold.price&&copper.price) ? (gold.price/(copper.price*1000)).toFixed(4) : null;
+      const latestGSR = (gold.price&&silver.price) ? (gold.price/silver.price).toFixed(2) : null;
 
       const goldLineData = useMemo(() =>
-        allData ? sampleArr(allData.map(d => ({ label: d.label, gold: d.gold })), 220) : null
+        allData ? sampleArr(allData.map(d=>({label:d.label,gold:d.gold})),220) : null
       , [allData]);
 
+      // BIAS
       const biasData = useMemo(() => {
         if (!gold.hist || gold.hist.length < 20) return null;
-        const last60 = gold.hist.slice(-60).map(d => ({ date: d.date.slice(5), gold: d.close }));
-        const m5 = computeMA(last60, "gold", 5);
-        const m20 = computeMA(last60, "gold", 20);
-        return last60.map((it, i) => ({
-          date: it.date,
-          bias5:  m5[i]  !== null ? +((it.gold - m5[i])  / m5[i]  * 100).toFixed(3) : null,
-          bias20: m20[i] !== null ? +((it.gold - m20[i]) / m20[i] * 100).toFixed(3) : null,
-        })).filter(d => d.bias20 !== null);
+        const last60 = gold.hist.slice(-60).map(d=>({date:d.date.slice(5),gold:d.close}));
+        const m5=computeMA(last60,"gold",5), m20=computeMA(last60,"gold",20);
+        return last60.map((it,i)=>({
+          date:it.date,
+          bias5:  m5[i]!==null?+((it.gold-m5[i])/m5[i]*100).toFixed(3):null,
+          bias20: m20[i]!==null?+((it.gold-m20[i])/m20[i]*100).toFixed(3):null,
+        })).filter(d=>d.bias20!==null);
       }, [gold.hist]);
 
-      const b5  = biasData?.[biasData.length - 1]?.bias5;
-      const b20 = biasData?.[biasData.length - 1]?.bias20;
+      const b5  = biasData?.[biasData.length-1]?.bias5;
+      const b20 = biasData?.[biasData.length-1]?.bias20;
+
+      // GVZ 图表数据（取最近30条，与 BIAS 日期对齐）
+      const gvzChartData = useMemo(() => {
+        if (!gvz.hist) return null;
+        return gvz.hist.slice(-35).map(d => ({ date: d.date.slice(5), gvz: d.close }));
+      }, [gvz.hist]);
 
       return (
         <div style={{background:"#030712",minHeight:"100vh",color:"#fff"}}>
           <div style={{maxWidth:860,margin:"0 auto",padding:"24px 20px"}}>
 
             {/* Header */}
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20,flexWrap:"wrap",gap:12}}>
               <div style={{display:"flex",alignItems:"center",gap:12}}>
                 <div style={{
                   width:44,height:44,borderRadius:12,
@@ -558,21 +536,16 @@
                 </div>
                 <div>
                   <div style={{fontSize:18,fontWeight:900,letterSpacing:-.2}}>COMEX 金融指标监测</div>
-                  <div style={{color:"#4b5563",fontSize:11,marginTop:2}}>黄金 · Twelvedata | 白银/铜 · Yahoo Finance</div>
+                  <div style={{color:"#4b5563",fontSize:11,marginTop:2}}>黄金 Twelvedata | 白银/铜/GVZ Yahoo | AI Gemini</div>
                 </div>
               </div>
 
               <div style={{display:"flex",alignItems:"center",gap:8}}>
-                <Btn onClick={refreshPrices} disabled={refreshing || loadStatus === "loading"} title="刷新实时价格">
+                <Btn onClick={fullLoad} disabled={refreshing} title="手动刷新全部数据 + AI分析">
                   <svg className={refreshing ? "animate-spin" : ""} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" strokeWidth="2" strokeLinecap="round">
                     <path d="M21 2v6h-6M3 12a9 9 0 0115.36-6.36L21 8M3 22v-6h6M21 12a9 9 0 01-15.36 6.36L3 16"/>
                   </svg>
-                </Btn>
-                <Btn onClick={fullLoad} disabled={loadStatus === "loading"} title="重新全量加载">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" strokeWidth="2" strokeLinecap="round">
-                    <polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/>
-                    <path d="M20.49 9A9 9 0 005.64 5.64L1 10M23 14l-4.64 4.36A9 9 0 013.51 15"/>
-                  </svg>
+                  <span style={{fontSize:11,color:"#9ca3af",fontWeight:600}}>刷新</span>
                 </Btn>
                 <div style={{textAlign:"right"}}>
                   <Badge status={refreshing ? "loading" : loadStatus} />
@@ -588,32 +561,27 @@
                 <span style={{color:"#fbbf24",fontSize:12}}>正在加载数据...</span>
               </div>
             )}
-            {loadStatus === "live" && (
+            {loadStatus === "live" && !refreshing && (
               <div style={{marginBottom:16,padding:"10px 14px",background:"rgba(52,211,153,.06)",border:"1px solid rgba(52,211,153,.2)",borderRadius:10,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                <span style={{color:"#34d399",fontSize:12,fontWeight:600}}>✓ 全部数据正常</span>
+                <span style={{color:"#34d399",fontSize:12,fontWeight:600}}>✓ 全部数据正常 · 仅手动刷新</span>
                 <span style={{color:"rgba(52,211,153,.5)",fontSize:11,fontFamily:"monospace"}}>{lastUpdate?.toLocaleTimeString("zh-CN")}</span>
               </div>
             )}
-            {loadStatus === "partial" && (
+            {loadStatus === "partial" && !refreshing && (
               <div style={{marginBottom:16,padding:"10px 14px",background:"rgba(251,191,36,.08)",border:"1px solid rgba(251,191,36,.2)",borderRadius:10,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                <span style={{color:"#fbbf24",fontSize:12,fontWeight:600}}>⚠️ 部分数据异常（见卡片提示）</span>
+                <span style={{color:"#fbbf24",fontSize:12,fontWeight:600}}>⚠️ 部分数据异常（见卡片）</span>
                 <span style={{color:"rgba(251,191,36,.5)",fontSize:11,fontFamily:"monospace"}}>{lastUpdate?.toLocaleTimeString("zh-CN")}</span>
               </div>
             )}
-            {loadStatus === "error" && (
-              <div style={{marginBottom:16,padding:"14px 16px",background:"rgba(69,10,10,.40)",border:"1px solid rgba(239,68,68,.40)",borderRadius:12}}>
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                  <span style={{fontSize:16}}>⛔</span>
-                  <span style={{color:"#f87171",fontSize:14,fontWeight:900}}>全部数据源不可用</span>
-                </div>
-                <div style={{color:"rgba(239,68,68,.65)",fontSize:11,lineHeight:1.6}}>
-                  网络或 API 异常，所有品种均无法获取数据。请检查网络后点击重载。
-                </div>
+            {loadStatus === "error" && !refreshing && (
+              <div style={{marginBottom:16,padding:"14px 16px",background:"rgba(69,10,10,.4)",border:"1px solid rgba(239,68,68,.4)",borderRadius:12}}>
+                <div style={{color:"#f87171",fontSize:14,fontWeight:900}}>⛔ 全部数据源不可用</div>
+                <div style={{color:"rgba(239,68,68,.65)",fontSize:11,marginTop:4}}>请检查网络后点击刷新按钮重试。</div>
               </div>
             )}
 
             {/* 价格卡片 */}
-            <div style={{display:"flex",gap:12,marginBottom:24}}>
+            <div style={{display:"flex",gap:12,marginBottom:24,flexWrap:"wrap"}}>
               <PriceCard label="COMEX 黄金" symbol="XAU/USD" source="Twelvedata"
                 value={gold.price?.toFixed(2)} unit="USD/oz" change={goldChg}
                 color="#f59e0b" error={gold.err} loading={gold.loading} />
@@ -627,179 +595,201 @@
 
             {/* 黄金走势 */}
             <SectionHead color="#f59e0b" icon="💰" title="黄金走势"
-              sub={allData ? `Twelvedata · ${allData[0]?.date} — ${allData[allData.length-1]?.date}` : (gold.err ? "数据异常，无法显示图表" : "加载中...")} />
+              sub={allData ? `${allData[0]?.date} — ${allData[allData.length-1]?.date}` : (gold.err || "加载中...")} />
             <div style={{background:"#1f2937",borderRadius:12,padding:16,border:"1px solid #374151",marginBottom:24,minHeight:220}}>
               {goldLineData ? (
                 <ResponsiveContainer width="100%" height={180}>
-                  <AreaChart data={goldLineData} margin={{ top: 5, right: 5, bottom: 0, left: 0 }}>
-                    <defs>
-                      <linearGradient id="gldG" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#f59e0b" stopOpacity={0.3} />
-                        <stop offset="100%" stopColor="#f59e0b" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#111827" />
-                    <XAxis dataKey="label" tick={{ fill: "#6b7280", fontSize: 10 }} axisLine={false} tickLine={false} interval={Math.floor(goldLineData.length / 6)} />
-                    <YAxis tick={{ fill: "#6b7280", fontSize: 10 }} axisLine={false} tickLine={false} domain={["auto", "auto"]} width={54} tickFormatter={(v) => v.toFixed(0)} />
-                    <Tooltip content={<ChartTip decimals={2} />} />
-                    <Area type="monotone" dataKey="gold" name="黄金" stroke="#f59e0b" strokeWidth={1.5} fill="url(#gldG)" dot={false} activeDot={{ r: 3, fill: "#f59e0b" }} />
+                  <AreaChart data={goldLineData} margin={{top:5,right:5,bottom:0,left:0}}>
+                    <defs><linearGradient id="gldG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#f59e0b" stopOpacity={0.3}/><stop offset="100%" stopColor="#f59e0b" stopOpacity={0}/></linearGradient></defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#111827"/>
+                    <XAxis dataKey="label" tick={{fill:"#6b7280",fontSize:10}} axisLine={false} tickLine={false} interval={Math.floor(goldLineData.length/6)}/>
+                    <YAxis tick={{fill:"#6b7280",fontSize:10}} axisLine={false} tickLine={false} domain={["auto","auto"]} width={54} tickFormatter={v=>v.toFixed(0)}/>
+                    <Tooltip content={<ChartTip decimals={2}/>}/>
+                    <Area type="monotone" dataKey="gold" name="黄金" stroke="#f59e0b" strokeWidth={1.5} fill="url(#gldG)" dot={false} activeDot={{r:3,fill:"#f59e0b"}}/>
                   </AreaChart>
                 </ResponsiveContainer>
-              ) : (
-                <ChartError msg={gold.err || "历史数据加载中..."} />
-              )}
+              ) : <ChartError msg={gold.err||"加载中..."}/>}
             </div>
 
             {/* 比价 */}
-            <SectionHead color="#f97316" icon="⚖️" title="COMEX 金属比价" sub={allData ? `基于 ${allData.length} 条3年历史数据` : "等待历史数据..."} />
+            <SectionHead color="#f97316" icon="⚖️" title="COMEX 金属比价" sub={allData ? `基于 ${allData.length} 条数据` : "等待数据..."}/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
-              <RatioCard
-                label="金铜比 (Au/Cu·1000)"
-                value={latestGCR ?? "—"} avg={stats?.avgGCR ?? "—"} high={stats?.maxGCR ?? "—"} low={stats?.minGCR ?? "—"}
-                error={!latestGCR ? (gold.err || copper.err || "数据加载中") : null}
-              />
-              <RatioCard
-                label="金银比 (Au/Ag)"
-                value={latestGSR ?? "—"} avg={stats?.avgGSR ?? "—"} high={stats?.maxGSR ?? "—"} low={stats?.minGSR ?? "—"}
-                error={!latestGSR ? (gold.err || silver.err || "数据加载中") : null}
-              />
+              <RatioCard label="金铜比 (Au/Cu·1000)" value={latestGCR??"—"} avg={stats?.avgGCR??"—"} high={stats?.maxGCR??"—"} low={stats?.minGCR??"—"} error={!latestGCR?(gold.err||copper.err||"加载中"):null}/>
+              <RatioCard label="金银比 (Au/Ag)" value={latestGSR??"—"} avg={stats?.avgGSR??"—"} high={stats?.maxGSR??"—"} low={stats?.minGSR??"—"} error={!latestGSR?(gold.err||silver.err||"加载中"):null}/>
             </div>
 
             {/* 金铜比走势 */}
             <div style={{background:"#1f2937",borderRadius:12,padding:16,border:"1px solid #374151",marginBottom:12,minHeight:220}}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-                <span style={{fontSize:11,color:"#9ca3af",fontWeight:600}}>📈 金铜比 · 近3年走势</span>
-                {chartData && <span style={{fontSize:10,color:"#4b5563",fontFamily:"monospace"}}>{chartData[0]?.date?.slice(0,7)} — {chartData[chartData.length-1]?.date?.slice(0,7)}</span>}
+                <span style={{fontSize:11,color:"#9ca3af",fontWeight:600}}>📈 金铜比 · 近3年</span>
               </div>
               {chartData ? (
                 <ResponsiveContainer width="100%" height={170}>
-                  <AreaChart data={chartData} margin={{ top: 5, right: 5, bottom: 0, left: 0 }}>
-                    <defs>
-                      <linearGradient id="gcG" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#f97316" stopOpacity={0.25} />
-                        <stop offset="100%" stopColor="#f97316" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#111827" />
-                    <XAxis dataKey="label" tick={{ fill: "#6b7280", fontSize: 10 }} axisLine={false} tickLine={false} interval={Math.floor(chartData.length / 6)} />
-                    <YAxis tick={{ fill: "#6b7280", fontSize: 10 }} axisLine={false} tickLine={false} domain={["auto", "auto"]} width={54} tickFormatter={(v) => v.toFixed(2)} />
-                    <Tooltip content={<ChartTip />} />
-                    {stats && <ReferenceLine y={+stats.avgGCR} stroke="#f97316" strokeDasharray="5 5" strokeOpacity={0.35} label={{ value: "AVG", position: "right", fill: "#f97316", fontSize: 9 }} />}
-                    <Area type="monotone" dataKey="goldCopperRatio" name="金铜比" stroke="#f97316" strokeWidth={1.5} fill="url(#gcG)" dot={false} activeDot={{ r: 3, fill: "#f97316" }} />
+                  <AreaChart data={chartData} margin={{top:5,right:5,bottom:0,left:0}}>
+                    <defs><linearGradient id="gcG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#f97316" stopOpacity={0.25}/><stop offset="100%" stopColor="#f97316" stopOpacity={0}/></linearGradient></defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#111827"/>
+                    <XAxis dataKey="label" tick={{fill:"#6b7280",fontSize:10}} axisLine={false} tickLine={false} interval={Math.floor(chartData.length/6)}/>
+                    <YAxis tick={{fill:"#6b7280",fontSize:10}} axisLine={false} tickLine={false} domain={["auto","auto"]} width={54} tickFormatter={v=>v.toFixed(2)}/>
+                    <Tooltip content={<ChartTip/>}/>
+                    {stats&&<ReferenceLine y={+stats.avgGCR} stroke="#f97316" strokeDasharray="5 5" strokeOpacity={0.35}/>}
+                    <Area type="monotone" dataKey="goldCopperRatio" name="金铜比" stroke="#f97316" strokeWidth={1.5} fill="url(#gcG)" dot={false} activeDot={{r:3,fill:"#f97316"}}/>
                   </AreaChart>
                 </ResponsiveContainer>
-              ) : (
-                <ChartError msg={(gold.err || copper.err) || "历史数据加载中..."} />
-              )}
+              ) : <ChartError msg={(gold.err||copper.err)||"加载中..."}/>}
             </div>
 
             {/* 金银比走势 */}
             <div style={{background:"#1f2937",borderRadius:12,padding:16,border:"1px solid #374151",marginBottom:24,minHeight:220}}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-                <span style={{fontSize:11,color:"#9ca3af",fontWeight:600}}>📈 金银比 · 近3年走势</span>
-                {chartData && <span style={{fontSize:10,color:"#4b5563",fontFamily:"monospace"}}>{chartData[0]?.date?.slice(0,7)} — {chartData[chartData.length-1]?.date?.slice(0,7)}</span>}
+                <span style={{fontSize:11,color:"#9ca3af",fontWeight:600}}>📈 金银比 · 近3年</span>
               </div>
               {chartData ? (
                 <ResponsiveContainer width="100%" height={170}>
-                  <AreaChart data={chartData} margin={{ top: 5, right: 5, bottom: 0, left: 0 }}>
-                    <defs>
-                      <linearGradient id="gsG" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#94a3b8" stopOpacity={0.25} />
-                        <stop offset="100%" stopColor="#94a3b8" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#111827" />
-                    <XAxis dataKey="label" tick={{ fill: "#6b7280", fontSize: 10 }} axisLine={false} tickLine={false} interval={Math.floor(chartData.length / 6)} />
-                    <YAxis tick={{ fill: "#6b7280", fontSize: 10 }} axisLine={false} tickLine={false} domain={["auto", "auto"]} width={40} />
-                    <Tooltip content={<ChartTip decimals={2} />} />
-                    {stats && <ReferenceLine y={+stats.avgGSR} stroke="#94a3b8" strokeDasharray="5 5" strokeOpacity={0.35} label={{ value: "AVG", position: "right", fill: "#94a3b8", fontSize: 9 }} />}
-                    <Area type="monotone" dataKey="goldSilverRatio" name="金银比" stroke="#94a3b8" strokeWidth={1.5} fill="url(#gsG)" dot={false} activeDot={{ r: 3, fill: "#94a3b8" }} />
+                  <AreaChart data={chartData} margin={{top:5,right:5,bottom:0,left:0}}>
+                    <defs><linearGradient id="gsG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#94a3b8" stopOpacity={0.25}/><stop offset="100%" stopColor="#94a3b8" stopOpacity={0}/></linearGradient></defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#111827"/>
+                    <XAxis dataKey="label" tick={{fill:"#6b7280",fontSize:10}} axisLine={false} tickLine={false} interval={Math.floor(chartData.length/6)}/>
+                    <YAxis tick={{fill:"#6b7280",fontSize:10}} axisLine={false} tickLine={false} domain={["auto","auto"]} width={40}/>
+                    <Tooltip content={<ChartTip decimals={2}/>}/>
+                    {stats&&<ReferenceLine y={+stats.avgGSR} stroke="#94a3b8" strokeDasharray="5 5" strokeOpacity={0.35}/>}
+                    <Area type="monotone" dataKey="goldSilverRatio" name="金银比" stroke="#94a3b8" strokeWidth={1.5} fill="url(#gsG)" dot={false} activeDot={{r:3,fill:"#94a3b8"}}/>
                   </AreaChart>
                 </ResponsiveContainer>
-              ) : (
-                <ChartError msg={(gold.err || silver.err) || "历史数据加载中..."} />
-              )}
+              ) : <ChartError msg={(gold.err||silver.err)||"加载中..."}/>}
             </div>
 
             {/* BIAS */}
-            <SectionHead color="#a78bfa" icon="📊" title="黄金均线乖离率 BIAS" sub="基于 Twelvedata 黄金历史数据" />
-            <div style={{background:"#1f2937",borderRadius:12,padding:16,border:"1px solid #374151",marginBottom:16,minHeight:220}}>
+            <SectionHead color="#a78bfa" icon="📊" title="黄金均线乖离率 BIAS" sub="近60个交易日"/>
+            <div style={{background:"#1f2937",borderRadius:12,padding:16,border:"1px solid #374151",marginBottom:24,minHeight:220}}>
               {biasData ? (
                 <>
                   <div style={{display:"flex",alignItems:"center",gap:20,marginBottom:8,flexWrap:"wrap"}}>
                     <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      <span style={{width:16,height:2,background:"#22d3ee",borderRadius:1}} />
+                      <span style={{width:16,height:2,background:"#22d3ee",borderRadius:1}}/>
                       <span style={{fontSize:11,color:"#6b7280"}}>5日</span>
-                      <span style={{fontSize:11,fontWeight:800,fontFamily:"monospace",color: b5 >= 0 ? "#34d399" : "#f87171"}}>
-                        {b5 >= 0 ? "+" : ""}{b5?.toFixed(3)}%
-                      </span>
+                      <span style={{fontSize:11,fontWeight:800,fontFamily:"monospace",color:b5>=0?"#34d399":"#f87171"}}>{b5>=0?"+":""}{b5?.toFixed(3)}%</span>
                     </div>
                     <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      <span style={{width:16,height:2,background:"#fbbf24",borderRadius:1}} />
+                      <span style={{width:16,height:2,background:"#fbbf24",borderRadius:1}}/>
                       <span style={{fontSize:11,color:"#6b7280"}}>20日</span>
-                      <span style={{fontSize:11,fontWeight:800,fontFamily:"monospace",color: b20 >= 0 ? "#34d399" : "#f87171"}}>
-                        {b20 >= 0 ? "+" : ""}{b20?.toFixed(3)}%
-                      </span>
+                      <span style={{fontSize:11,fontWeight:800,fontFamily:"monospace",color:b20>=0?"#34d399":"#f87171"}}>{b20>=0?"+":""}{b20?.toFixed(3)}%</span>
                     </div>
                   </div>
-
                   <ResponsiveContainer width="100%" height={150}>
-                    <LineChart data={biasData} margin={{ top: 10, right: 5, bottom: 0, left: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#111827" />
-                      <XAxis dataKey="date" tick={{ fill: "#6b7280", fontSize: 10 }} axisLine={false} tickLine={false} interval={5} />
-                      <YAxis tick={{ fill: "#6b7280", fontSize: 10 }} axisLine={false} tickLine={false} domain={["auto", "auto"]} width={40} tickFormatter={(v) => `${v.toFixed(1)}%`} />
-                      <Tooltip content={<ChartTip suffix="%" decimals={3} />} />
-                      <ReferenceLine y={0} stroke="#4b5563" strokeWidth={1} />
-                      <ReferenceLine y={3} stroke="#ef4444" strokeDasharray="3 3" strokeOpacity={0.25} />
-                      <ReferenceLine y={-3} stroke="#10b981" strokeDasharray="3 3" strokeOpacity={0.25} />
-                      <Line type="monotone" dataKey="bias5" name="BIAS 5日" stroke="#22d3ee" strokeWidth={1.5} dot={false} activeDot={{ r: 3 }} />
-                      <Line type="monotone" dataKey="bias20" name="BIAS 20日" stroke="#fbbf24" strokeWidth={1.5} dot={false} activeDot={{ r: 3 }} />
+                    <LineChart data={biasData} margin={{top:10,right:5,bottom:0,left:0}}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#111827"/>
+                      <XAxis dataKey="date" tick={{fill:"#6b7280",fontSize:10}} axisLine={false} tickLine={false} interval={5}/>
+                      <YAxis tick={{fill:"#6b7280",fontSize:10}} axisLine={false} tickLine={false} domain={["auto","auto"]} width={40} tickFormatter={v=>v.toFixed(1)+"%"}/>
+                      <Tooltip content={<ChartTip suffix="%" decimals={3}/>}/>
+                      <ReferenceLine y={0} stroke="#4b5563" strokeWidth={1}/>
+                      <ReferenceLine y={3} stroke="#ef4444" strokeDasharray="3 3" strokeOpacity={0.25}/>
+                      <ReferenceLine y={-3} stroke="#10b981" strokeDasharray="3 3" strokeOpacity={0.25}/>
+                      <Line type="monotone" dataKey="bias5" name="BIAS 5日" stroke="#22d3ee" strokeWidth={1.5} dot={false} activeDot={{r:3}}/>
+                      <Line type="monotone" dataKey="bias20" name="BIAS 20日" stroke="#fbbf24" strokeWidth={1.5} dot={false} activeDot={{r:3}}/>
                     </LineChart>
                   </ResponsiveContainer>
-
                   <div style={{display:"flex",justifyContent:"center",gap:24,marginTop:8,fontSize:11,color:"#4b5563"}}>
-                    <span>🔴 BIAS &gt; 3% 短期超买</span>
-                    <span>🟢 BIAS &lt; -3% 短期超卖</span>
+                    <span>🔴 BIAS &gt; 3% 超买</span><span>🟢 BIAS &lt; -3% 超卖</span>
                   </div>
                 </>
+              ) : <ChartError msg={gold.err||"加载中..."}/>}
+            </div>
+
+            {/* GVZ 波动率 */}
+            <SectionHead color="#ec4899" icon="🌊" title="GVZ 黄金波动率指数" sub={gvz.price ? `当前 ${gvz.price} · CBOE 30日隐含波动率` : (gvz.err || "加载中...")}/>
+            <div style={{background:"#1f2937",borderRadius:12,padding:16,border:"1px solid #374151",marginBottom:24,minHeight:220}}>
+              {gvzChartData ? (
+                <>
+                  <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:8}}>
+                    <span style={{fontSize:28,fontWeight:900,fontFamily:"monospace",color:"#ec4899"}}>{gvz.price}</span>
+                    <span style={{fontSize:11,color:"#6b7280"}}>GVZ Index</span>
+                    {gvz.price >= 25 && <span style={{fontSize:10,background:"rgba(239,68,68,.15)",color:"#f87171",padding:"2px 8px",borderRadius:4,fontWeight:700}}>⚠ 高波动</span>}
+                    {gvz.price < 15 && <span style={{fontSize:10,background:"rgba(52,211,153,.15)",color:"#34d399",padding:"2px 8px",borderRadius:4,fontWeight:700}}>低波动</span>}
+                  </div>
+                  <ResponsiveContainer width="100%" height={150}>
+                    <AreaChart data={gvzChartData} margin={{top:5,right:5,bottom:0,left:0}}>
+                      <defs><linearGradient id="gvzG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#ec4899" stopOpacity={0.3}/><stop offset="100%" stopColor="#ec4899" stopOpacity={0}/></linearGradient></defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#111827"/>
+                      <XAxis dataKey="date" tick={{fill:"#6b7280",fontSize:10}} axisLine={false} tickLine={false} interval={Math.max(1,Math.floor(gvzChartData.length/7))}/>
+                      <YAxis tick={{fill:"#6b7280",fontSize:10}} axisLine={false} tickLine={false} domain={["auto","auto"]} width={36}/>
+                      <Tooltip content={<ChartTip decimals={2}/>}/>
+                      <ReferenceLine y={20} stroke="#6b7280" strokeDasharray="3 3" strokeOpacity={0.3} label={{value:"20",position:"right",fill:"#6b7280",fontSize:9}}/>
+                      <Area type="monotone" dataKey="gvz" name="GVZ" stroke="#ec4899" strokeWidth={1.5} fill="url(#gvzG)" dot={false} activeDot={{r:3,fill:"#ec4899"}}/>
+                    </AreaChart>
+                  </ResponsiveContainer>
+                  <div style={{display:"flex",justifyContent:"center",gap:20,marginTop:8,fontSize:11,color:"#4b5563"}}>
+                    <span>GVZ &lt; 15 低波动</span><span>15-25 正常</span><span>GVZ &gt; 25 高波动警戒</span>
+                  </div>
+                </>
+              ) : gvz.err ? (
+                <ChartError msg={gvz.err}/>
               ) : (
-                <ChartError msg={gold.err || "黄金历史数据加载中..."} />
+                <ChartError msg="GVZ 数据加载中..."/>
               )}
             </div>
 
-            {/* 日志 */}
-            {logs.length > 0 && (
-              <div style={{background:"rgba(17,24,39,.65)",borderRadius:12,padding:16,border:"1px solid #1f2937",marginBottom:16}}>
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-                  <div style={{fontSize:11,fontWeight:800,color:"#6b7280"}}>📋 请求日志</div>
-                  <button onClick={() => setLogs([])} style={{fontSize:11,color:"#374151",background:"none",border:"none",cursor:"pointer"}}>清除</button>
+            {/* AI 技术面分析 */}
+            <SectionHead color="#8b5cf6" icon="🤖" title="AI 技术面分析" sub="Gemini · 每次刷新时同步更新"/>
+            <div style={{background:"#1f2937",borderRadius:12,padding:20,border:"1px solid #374151",marginBottom:24,minHeight:180}}>
+              {aiLoading ? (
+                <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,padding:"32px 0"}}>
+                  <div className="animate-spin" style={{width:24,height:24,border:"2px solid #374151",borderTop:"2px solid #8b5cf6",borderRadius:"50%"}}/>
+                  <span style={{color:"#8b5cf6",fontSize:12,fontWeight:600}}>Gemini 正在分析...</span>
                 </div>
-                <div style={{maxHeight:180,overflowY:"auto",display:"flex",flexDirection:"column",gap:3}}>
-                  {logs.map((l, i) => (
-                    <div key={i} style={{
-                      fontSize:10,fontFamily:"monospace",display:"flex",gap:8,alignItems:"flex-start",
-                      color: l.type === "success" ? "rgba(52,211,153,.7)"
-                           : l.type === "error" ? "rgba(248,113,113,.7)"
-                           : "rgba(107,114,128,.65)"
-                    }}>
-                      <span style={{color:"#374151",width:60,flexShrink:0}}>{l.t}</span>
-                      <span style={{wordBreak:"break-all"}}>{l.msg}</span>
-                    </div>
-                  ))}
+              ) : aiError ? (
+                <div>
+                  <div style={{color:"#f87171",fontSize:13,fontWeight:800,marginBottom:6}}>⚠ AI 分析失败</div>
+                  <div style={{color:"rgba(239,68,68,.7)",fontSize:11,lineHeight:1.6,wordBreak:"break-all"}}>{aiError}</div>
                 </div>
-              </div>
-            )}
-
-            <div style={{textAlign:"center",color:"#1f2937",fontSize:11,paddingBottom:16}}>
-              COMEX Monitor v6.0 · 黄金 Twelvedata · 白银/铜 Yahoo Finance · 无模拟数据
+              ) : aiText ? (
+                <div style={{color:"#d1d5db",fontSize:12,lineHeight:1.85,whiteSpace:"pre-wrap",wordBreak:"break-word"}}>
+                  {aiText}
+                </div>
+              ) : (
+                <div style={{display:"flex",alignItems:"center",justifyContent:"center",padding:"32px 0",color:"#4b5563",fontSize:12}}>
+                  点击上方"刷新"按钮获取 AI 技术面分析
+                </div>
+              )}
+              {lastUpdate && !aiLoading && (
+                <div style={{marginTop:12,paddingTop:10,borderTop:"1px solid #374151",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontSize:10,color:"#374151"}}>Gemini {GEMINI_MODEL}</span>
+                  <span style={{fontSize:10,color:"#374151"}}>更新于 {lastUpdate.toLocaleTimeString("zh-CN")}</span>
+                </div>
+              )}
             </div>
 
+            {/* 数据源 */}
+            <div style={{background:"rgba(31,41,55,.5)",borderRadius:12,padding:16,border:"1px solid rgba(55,65,81,.5)",marginBottom:16}}>
+              <div style={{fontSize:11,fontWeight:800,color:"#6b7280",marginBottom:10}}>🔌 数据源</div>
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {[
+                  { n:"Twelvedata", s:"XAU/USD", r:"黄金", ok:!gold.err&&!gold.loading, err:gold.err, l:gold.loading },
+                  { n:"Yahoo Finance", s:"SI=F", r:"白银", ok:!silver.err&&!silver.loading, err:silver.err, l:silver.loading },
+                  { n:"Yahoo Finance", s:"HG=F", r:"铜", ok:!copper.err&&!copper.loading, err:copper.err, l:copper.loading },
+                  { n:"Yahoo Finance", s:"^GVZ", r:"黄金波动率", ok:!gvz.err&&!gvz.loading, err:gvz.err, l:gvz.loading },
+                  { n:"Google Gemini", s:GEMINI_MODEL, r:"AI 分析", ok:!!aiText&&!aiError, err:aiError, l:aiLoading },
+                ].map((s,i)=>(
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,background:s.err?"rgba(69,10,10,.25)":"rgba(17,24,39,.5)",borderRadius:8,padding:"6px 12px"}}>
+                    <span className={!s.ok&&!s.err?"animate-pulse":""} style={{width:6,height:6,borderRadius:"50%",background:s.ok?"#34d399":s.err?"#f87171":"#fbbf24",flexShrink:0}}/>
+                    <span style={{fontSize:11,color:"#e5e7eb",fontWeight:700,minWidth:100}}>{s.n}</span>
+                    <span style={{fontSize:10,color:"#4b5563",fontFamily:"monospace"}}>{s.s}</span>
+                    <span style={{fontSize:11,color:"#6b7280",flex:1}}>{s.r}</span>
+                    <span style={{fontSize:10,fontWeight:700,color:s.ok?"#34d399":s.err?"#f87171":"#fbbf24"}}>{s.ok?"正常":s.err?"异常":"加载中"}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{color:"#374151",fontSize:10,marginTop:10}}>⚡ 已关闭自动刷新 · 仅通过右上角按钮手动刷新全部数据 + AI分析</div>
+            </div>
+
+            <div style={{textAlign:"center",color:"#1f2937",fontSize:11,paddingBottom:16}}>
+              COMEX Monitor v7.0 · 手动刷新 · GVZ · Gemini AI
+            </div>
           </div>
         </div>
       );
     }
 
-    ReactDOM.createRoot(document.getElementById("root")).render(<COMEXDashboard />);
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
   </script>
 </body>
 </html>
